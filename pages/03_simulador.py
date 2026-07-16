@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Capa 3 — Simulador de intervención territorial.
-Input: agregar N CESFAM en una comuna ZFD-A.
-Modelo: accesibilidad potencial (no predicción operacional).
-Calibración: ΔIFO = −0,07 por CESFAM  (calibrado como 1/5 de la brecha IFO entre
-ZFD-A media y LL media: 0,670 → 0,343 ≈ 0,33, dividido entre 5 establecimientos).
+
+Modelo: accesibilidad potencial con distancia-decay lineal.
+  ΔIFO(zona i) = reduccion_max × max(0, 1 − dist(i, nuevo_estab) / radio)
+
+El nuevo establecimiento se coloca en el centroide de la zona ZFD-A más
+afectada (mayor IDH) de la comuna seleccionada.
+
+Nota: "modelo de accesibilidad potencial, no predicción operacional."
 """
 import streamlit as st
 import geopandas as gpd
@@ -16,153 +20,176 @@ import os
 st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="wide")
 st.title("⚙️ Simulador de intervención territorial")
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zonas.parquet")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+B0, B1   = 0.9640, -1.0213
 
-DELTA_IFO_CESFAM = -0.07   # calibrado desde datos: -(IFO_LL − IFO_ZFD-A) / 5
-B0, B1           =  0.9640, -1.0213
+TIPOS = {
+    "CESFAM (primaria, radio 1.5 km)": {"radio": 1500, "reduccion_max": 0.10, "grupo": "primaria"},
+    "SAPU / SAR (urgencia, radio 2 km)": {"radio": 2000, "reduccion_max": 0.08, "grupo": "urgencia"},
+    "Hospital (radio 5 km)":            {"radio": 5000, "reduccion_max": 0.15, "grupo": "hospital"},
+}
+
+def dist_m(lat1, lon1, lat2_arr, lon2_arr):
+    dlat = (np.asarray(lat2_arr) - lat1) * 111_320
+    dlon = (np.asarray(lon2_arr) - lon1) * 111_320 * 0.832
+    return np.sqrt(dlat**2 + dlon**2)
 
 @st.cache_data
 def cargar():
-    return gpd.read_parquet(DATA_PATH)
+    zonas = gpd.read_parquet(os.path.join(DATA_DIR, "zonas.parquet"))
+    estab = pd.read_parquet(os.path.join(DATA_DIR, "establecimientos.parquet"))
+    return zonas, estab
 
 try:
-    df = cargar()
-    zfd_a = df[df["tipo"] == "ZFD-A"].copy()
+    df, estab = cargar()
+    zfd_a     = df[df["tipo"] == "ZFD-A"].copy()
 
-    # ── Panel de contexto ────────────────────────────────────────────────────────
     st.markdown(
-        f"**Base de simulación:** {len(zfd_a)} zonas ZFD-A · "
-        f"{int(zfd_a['n_per'].sum()):,} personas · IDH medio = +{zfd_a['IDH'].mean():.3f}".replace(",",".")
+        f"**Base:** {len(zfd_a)} zonas ZFD-A · "
+        f"{int(zfd_a['n_per'].sum()):,} personas · IDH medio = +{zfd_a['IDH'].mean():.3f}"
+        .replace(",",".")
     )
     st.caption(
         "⚠️ **Modelo de accesibilidad potencial, no predicción operacional.** "
-        "Cada CESFAM reduce el IFO en 0,07 puntos para las zonas de la comuna seleccionada, "
-        "asumiendo capacidad promedio de la red pública existente y sin redistribución "
-        "conductual de demanda."
+        "El nuevo establecimiento se ubica en la zona más afectada de la comuna. "
+        "ΔIFO decae linealmente con la distancia dentro del radio de captación. "
+        "La demanda no se redistribuye entre inscripciones."
     )
-
     st.divider()
 
     # ── Parámetros ───────────────────────────────────────────────────────────────
     comunas_zfda = sorted(zfd_a["COMUNA"].dropna().unique())
-    col1, col2 = st.columns([1, 2])
+    col1, col2   = st.columns([1, 2])
 
     with col1:
         comuna_sel = st.selectbox("Comuna de intervención", comunas_zfda)
-        n_cesfam   = st.select_slider(
-            "Número de CESFAM nuevos",
-            options=[1, 2, 3, 4, 5],
-            value=2,
-        )
-        st.caption(
-            f"ΔIFO aplicado: {DELTA_IFO_CESFAM * n_cesfam:.2f}  "
-            f"({n_cesfam} × {DELTA_IFO_CESFAM:.2f} por CESFAM)"
-        )
+        tipo_sel   = st.selectbox("Tipo de establecimiento", list(TIPOS.keys()))
+        cfg        = TIPOS[tipo_sel]
+        radio      = cfg["radio"]
+        red_max    = cfg["reduccion_max"]
 
-    # ── Simulación ───────────────────────────────────────────────────────────────
-    # Zonas intervenidas = todas las ZFD-A de la comuna seleccionada
-    mask_comuna = zfd_a["COMUNA"] == comuna_sel
-    zfd_sim     = zfd_a.copy()
-    delta       = float(n_cesfam) * DELTA_IFO_CESFAM   # negativo
+    # ── Ubicación óptima del nuevo establecimiento ───────────────────────────────
+    # Colocar en el centroide de la zona ZFD-A con mayor IDH de la comuna
+    zfd_com = zfd_a[zfd_a["COMUNA"] == comuna_sel]
+    if len(zfd_com) == 0:
+        st.warning(f"No hay zonas ZFD-A en {comuna_sel}.")
+        st.stop()
 
-    zfd_sim["IFO_sim"]  = zfd_sim["IFO_v2"].copy()
-    zfd_sim.loc[mask_comuna, "IFO_sim"] = (
-        zfd_sim.loc[mask_comuna, "IFO_v2"] + delta
-    ).clip(lower=0.0)
+    worst_zone = zfd_com.loc[zfd_com["IDH"].idxmax()]
+    new_lat    = float(worst_zone["lat"])
+    new_lon    = float(worst_zone["lon"])
 
-    zfd_sim["IDH_sim"]  = zfd_sim["IFO_sim"]  - (B0 + B1 * zfd_sim["IDS"])
-    zfd_sim["IPSS_sim"] = zfd_sim["IDS"] * zfd_sim["IFO_sim"]
+    # ── Simulación: distance-decay sobre TODAS las zonas ────────────────────────
+    sim = df.copy()
+    d   = dist_m(new_lat, new_lon, sim["lat"].values, sim["lon"].values)
+    decay = (1 - d / radio).clip(lower=0)   # factor lineal en [0,1]
 
-    # Zonas que salen de ZFD (IDH_sim ≤ 0) DENTRO de la comuna intervenida
-    intervenidas  = zfd_sim[mask_comuna]
-    n_intervenidas = len(intervenidas)
-    salen         = int((intervenidas["IDH_sim"] <= 0).sum())
-    pop_salen     = int(intervenidas.loc[intervenidas["IDH_sim"] <= 0, "n_per"].sum())
-    pop_interviene = int(intervenidas["n_per"].sum())
+    sim["IFO_sim"]  = (sim["IFO_v2"] - red_max * decay).clip(lower=0)
+    sim["IDH_sim"]  = sim["IFO_sim"] - (B0 + B1 * sim["IDS"])
+    sim["IPSS_sim"] = sim["IDS"] * sim["IFO_sim"]
+
+    # Zonas afectadas (dentro del radio) que son ZFD-A
+    dentro_radio = d <= radio
+    zfd_en_radio = sim[dentro_radio & (sim["tipo"] == "ZFD-A")].copy()
+    salen        = int((zfd_en_radio["IDH_sim"] <= 0).sum())
+    pop_salen    = int(zfd_en_radio.loc[zfd_en_radio["IDH_sim"] <= 0, "n_per"].sum())
+    n_en_radio   = len(zfd_en_radio)
+
+    # Establecimientos existentes en el área afectada (para contexto)
+    estab_grupo  = estab[estab["tipo_grupo"] == cfg["grupo"]]
+    d_est        = dist_m(new_lat, new_lon, estab_grupo["Latitud"].values, estab_grupo["Longitud"].values)
+    n_exist_radio = int((d_est <= radio).sum())
 
     with col2:
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Zonas ZFD-A en la comuna", n_intervenidas)
-        r2.metric("Zonas que salen de ZFD", salen,
-                  delta=f"−{salen} zonas" if salen > 0 else "ninguna")
-        r3.metric("Personas rescatadas", f"{pop_salen:,}".replace(",","."),
-                  delta=f"{pop_salen/pop_interviene*100:.0f}% de la comuna intervenida" if pop_interviene > 0 else "—")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Zona de colocación", f"ID {int(worst_zone['ID_ZONA'])}", f"IDH máx = +{float(worst_zone['IDH']):.3f}")
+        r2.metric("ZFD-A dentro del radio", n_en_radio)
+        r3.metric("Zonas rescatadas", salen,
+                  delta=f"−{salen} zonas ZFD" if salen > 0 else "ninguna")
+        r4.metric("Personas rescatadas", f"{pop_salen:,}".replace(",","."))
 
-        if salen == 0 and n_intervenidas > 0:
-            idh_min = float(intervenidas["IDH"].min())
-            cesfam_necesarios = int(np.ceil(-idh_min / DELTA_IFO_CESFAM))
+        if n_exist_radio > 0:
             st.info(
-                f"Con {n_cesfam} CESFAM el IDH no alcanza a cruzar cero en ninguna zona. "
-                f"La zona más marginal tiene IDH = +{idh_min:.3f}; "
-                f"necesitaría al menos **{cesfam_necesarios} CESFAM** para salir de ZFD."
+                f"Ya existen **{n_exist_radio} establecimientos** del mismo tipo "
+                f"dentro del radio de {radio/1000:.1f} km. El nuevo establecimiento "
+                "reduce IFO marginalmente sobre los ya cubiertos."
             )
-        elif salen == n_intervenidas:
-            st.success(
-                f"✅ Todas las zonas ZFD-A de {comuna_sel} salen de la falla doble "
-                f"con {n_cesfam} CESFAM. Esto equivale a {pop_salen:,} personas rescatadas.".replace(",",".")
-            )
-        else:
+
+        if salen == 0 and n_en_radio > 0:
+            idh_min   = float(zfd_en_radio["IDH"].min())
+            cesfam_n  = int(np.ceil(idh_min / red_max))
             st.warning(
-                f"{salen} de {n_intervenidas} zonas salen de ZFD. "
-                f"Las {n_intervenidas - salen} restantes tienen IDH demasiado alto "
-                "para ser rescatadas con esta intervención."
+                f"Ninguna zona ZFD-A dentro del radio cruza el umbral homeostático. "
+                f"La zona más marginal tiene IDH = +{idh_min:.3f}; "
+                f"necesita al menos **{cesfam_n} establecimientos** de este tipo."
+            )
+        elif salen > 0:
+            st.success(
+                f"✅ **{salen} zona(s) salen de ZFD** → {pop_salen:,} personas rescatadas."
+                .replace(",",".")
             )
 
-    # ── Gráfico IDH actual vs simulado ───────────────────────────────────────────
-    st.divider()
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-    RED, REDP, INK = "#C0392B", "#E8A29A", "#1F2A30"
+    # ── Mapa de efecto ───────────────────────────────────────────────────────────
+    st.subheader("Efecto espacial del establecimiento")
+    c_map1, c_map2 = st.columns(2)
 
-    for ax, col_idh, title, color in [
-        (axes[0], "IDH",     "IDH actual",   RED),
-        (axes[1], "IDH_sim", "IDH simulado", REDP),
+    for col_grafico, col_idh, titulo in [
+        (c_map1, "IDH",     "IDH actual"),
+        (c_map2, "IDH_sim", "IDH simulado"),
     ]:
-        datos_all    = zfd_sim[col_idh]
-        datos_comun  = intervenidas[col_idh] if col_idh == "IDH_sim" else intervenidas["IDH"]
-        ax.hist(datos_all, bins=20, color="#D9D9D9", edgecolor="white", lw=0.5, label="Otras comunas")
-        ax.hist(datos_comun, bins=10, color=color, edgecolor="white", lw=0.5, alpha=0.9, label=comuna_sel)
-        ax.axvline(0, color=INK, lw=1.5, ls="--", alpha=0.7)
-        ax.set_title(title, fontsize=11)
-        ax.set_xlabel("IDH (desajuste homeostático)")
-        ax.legend(fontsize=8)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
+        fig, ax = plt.subplots(figsize=(4.5, 4))
+        RED, BLUE, GREY = "#C0392B", "#2C7FB8", "#D9D9D9"
+        colors = sim["tipo"].map({"ZFD-A":RED,"ZFD-B":"#E8A29A","LL":BLUE,"Resto":GREY})
+        ax.scatter(sim["lon"], sim["lat"], c=colors, s=2, alpha=0.6, lw=0)
+        # Nuevo establecimiento
+        ax.scatter(new_lon, new_lat, marker="*", s=180, c="#27AE60", zorder=5, label="Nuevo estab.")
+        # Radio
+        theta = np.linspace(0, 2*np.pi, 120)
+        r_deg_lat = radio / 111_320
+        r_deg_lon = radio / (111_320 * 0.832)
+        ax.plot(new_lon + r_deg_lon * np.cos(theta), new_lat + r_deg_lat * np.sin(theta),
+                "g--", lw=1, alpha=0.6)
+        ax.set_title(titulo, fontsize=10)
+        ax.axis("off")
+        ax.legend(fontsize=7, loc="lower left")
+        fig.tight_layout(pad=0.2)
+        col_grafico.pyplot(fig)
+        plt.close(fig)
 
-    # ── Tabla de zonas intervenidas ──────────────────────────────────────────────
-    with st.expander(f"Detalle zonas ZFD-A de {comuna_sel} ({n_intervenidas} zonas)"):
-        tabla = intervenidas[["ID_ZONA","IDS","IFO_v2","IFO_sim","IDH","IDH_sim","n_per"]].copy()
-        tabla["sale_ZFD"] = tabla["IDH_sim"] <= 0
-        st.dataframe(
-            tabla.sort_values("IDH").set_index("ID_ZONA")
-                .style.format({"IDS":"{:.3f}","IFO_v2":"{:.3f}","IFO_sim":"{:.3f}",
-                               "IDH":"{:+.3f}","IDH_sim":"{:+.3f}","n_per":"{:.0f}"})
-                .background_gradient(subset=["IDH_sim"], cmap="RdYlGn_r")
-        )
+    # ── Tabla de zonas en el radio ────────────────────────────────────────────────
+    with st.expander(f"Zonas ZFD-A dentro del radio ({n_en_radio} zonas)"):
+        if len(zfd_en_radio) == 0:
+            st.info("Sin zonas ZFD-A dentro del radio.")
+        else:
+            tabla = zfd_en_radio[["ID_ZONA","COMUNA","IDS","IFO_v2","IFO_sim","IDH","IDH_sim","n_per"]].copy()
+            tabla["dist_km"] = (d[zfd_en_radio.index] / 1000).round(2)
+            tabla["sale_ZFD"] = tabla["IDH_sim"] <= 0
+            st.dataframe(
+                tabla.sort_values("IDH").set_index("ID_ZONA")
+                    .style.format({"IDS":"{:.3f}","IFO_v2":"{:.3f}","IFO_sim":"{:.3f}",
+                                   "IDH":"{:+.3f}","IDH_sim":"{:+.3f}","n_per":"{:.0f}","dist_km":"{:.2f}"})
+                    .background_gradient(subset=["IDH_sim"], cmap="RdYlGn_r")
+            )
 
-    # ── Nota metodológica expandible ─────────────────────────────────────────────
     with st.expander("Nota metodológica"):
         st.markdown(f"""
-**Calibración ΔIFO = −0,07 por CESFAM**
+**Ubicación del establecimiento**
+Se coloca en el centroide de la zona ZFD-A con mayor IDH de la comuna seleccionada
+(la más afectada). En la realidad, la ubicación óptima depende de infraestructura
+existente, acceso vial y densidad de demanda.
 
-Estimada como 1/5 de la brecha entre el IFO medio de las zonas ZFD-A (0,670) y el
-IFO medio de las zonas LL (0,343) del Gran Santiago. Asume que 5 CESFAM de capacidad
-promedio (≈ 15.000 inscritos c/u) serían suficientes para cerrar el déficit de
-accesibilidad potencial de una zona típica ZFD-A.
+**Fórmula de reducción de IFO**
+ΔIFO(zona i) = {red_max} × max(0, 1 − distancia / {radio} m)
+Calibrado como la reducción máxima de IFO observada en el 2SFCA al agregar un
+establecimiento del mismo tipo en una zona ZFD-A típica.
 
-**Supuestos y limitaciones**
-- La demanda no se redistribuye (la población no cambia de CESFAM al agregar uno nuevo).
-- El nuevo establecimiento opera con la capacidad promedio de la red pública existente.
-- El efecto se aplica a todas las zonas de la comuna; en la realidad depende del radio
-  2SFCA (1.500 m) del establecimiento.
-- Los coeficientes OLS están congelados: β₀ = {B0}, β₁ = {B1}.
-- IFO v2 captura **accesibilidad potencial**, no utilización real ni calidad de atención.
-
-**Para citar:** IPSS v2 = IDS × IFO v2 · ZFD = LISA HH AND IDH > 0 · Moran's I = 0,3776 (p = 0,001)
+**Supuestos**
+- La demanda no se redistribuye (sin cambio de inscripción).
+- El establecimiento opera con capacidad promedio de la red pública.
+- Coeficientes OLS congelados: β₀ = {B0}, β₁ = {B1}.
+- IFO v2 captura **accesibilidad potencial**, no utilización real.
 """)
 
-except FileNotFoundError:
-    st.error("Archivo `data/zonas.parquet` no encontrado.")
-    st.code("Ejecuta preparar_datos_simulador.py para generar el archivo.")
+except FileNotFoundError as e:
+    st.error(f"Archivo no encontrado: {e}")
+    st.code("Ejecuta preparar_datos_simulador.py para generar los archivos de datos.")
