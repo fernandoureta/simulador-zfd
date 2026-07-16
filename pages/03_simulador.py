@@ -1,119 +1,168 @@
 # -*- coding: utf-8 -*-
 """
-Capa 3 — Simulador de intervención
-Proyecta el impacto de agregar establecimientos de salud en zonas ZFD-A.
+Capa 3 — Simulador de intervención territorial.
+Input: agregar N CESFAM en una comuna ZFD-A.
+Modelo: accesibilidad potencial (no predicción operacional).
+Calibración: ΔIFO = −0,07 por CESFAM  (calibrado como 1/5 de la brecha IFO entre
+ZFD-A media y LL media: 0,670 → 0,343 ≈ 0,33, dividido entre 5 establecimientos).
 """
 import streamlit as st
+import geopandas as gpd
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
-st.set_page_config(page_title="Simulador", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="wide")
 st.title("⚙️ Simulador de intervención territorial")
-st.caption("¿Cuántas zonas ZFD-A dejarían de ser ZFD si se agrega capacidad de atención?")
+
+DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zonas.parquet")
+
+DELTA_IFO_CESFAM = -0.07   # calibrado desde datos: -(IFO_LL − IFO_ZFD-A) / 5
+B0, B1           =  0.9640, -1.0213
 
 @st.cache_data
-def cargar_datos():
-    ifo  = pd.read_parquet("data/ifo_v2_zonal.parquet")
-    lisa = pd.read_parquet("data/lisa_zonal.parquet")
-
-    ifo["COMUNA"] = ifo["COMUNA"].str.title().str.strip()
-    cols_ok = [c for c in ifo.columns if c not in lisa.columns] + ["ID_ZONA"]
-    full = lisa.merge(ifo[cols_ok], on="ID_ZONA", how="left")
-    full["COMUNA"]   = full["COMUNA"].str.title().str.strip()
-    full["lisa_cat"] = full["lisa_cat"].fillna("NS")
-
-    B0, B1 = 0.9640, -1.0213
-    full["IDH"] = full["IFO_v2"] - (B0 + B1 * full["IDS"])
-
-    COMUNAS_B = {"Las Condes","Vitacura","Providencia","Ñuñoa","Lo Barnechea","La Reina"}
-    full["grupo_b"] = full["COMUNA"].isin(COMUNAS_B)
-    full["ZFD"]     = (full["lisa_cat"] == "HH") & (full["IDH"] > 0)
-
-    def cat4(row):
-        if row["ZFD"] and not row["grupo_b"]: return "ZFD-A"
-        if row["ZFD"] and row["grupo_b"]:     return "ZFD-B"
-        if row["lisa_cat"] == "LL":           return "LL"
-        return "Resto"
-    full["tipo"] = full.apply(cat4, axis=1)
-    return full
+def cargar():
+    return gpd.read_parquet(DATA_PATH)
 
 try:
-    df = cargar_datos()
+    df = cargar()
     zfd_a = df[df["tipo"] == "ZFD-A"].copy()
 
-    st.markdown(f"**Base de simulación:** {len(zfd_a)} zonas ZFD-A")
-
-    st.subheader("Parámetros de intervención")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        reduccion_ifo = st.slider(
-            "Reducción de IFO por zona intervenida (puntos)",
-            min_value=0.05, max_value=0.50, value=0.15, step=0.01,
-            help="Cuánto baja el IFO v2 si se añade un establecimiento de salud primario en la zona"
-        )
-        n_zonas = st.slider(
-            "Número de zonas a intervenir",
-            min_value=1, max_value=len(zfd_a), value=min(20, len(zfd_a)), step=1
-        )
-
-    with col2:
-        criterio = st.radio(
-            "Priorizar zonas por:",
-            ["Mayor IPSS v2 (mayor presión)", "Mayor IDH (mayor desajuste)", "Mayor IDS (mayor vulnerabilidad)"],
-        )
-
-    col_ord = {"Mayor IPSS v2 (mayor presión)": "IPSS_v2",
-               "Mayor IDH (mayor desajuste)": "IDH",
-               "Mayor IDS (mayor vulnerabilidad)": "IDS"}[criterio]
-
-    # Simulación
-    zfd_sim = zfd_a.sort_values(col_ord, ascending=False).copy()
-    intervenir = zfd_sim.head(n_zonas).index
-    zfd_sim["IFO_sim"] = zfd_sim["IFO_v2"].copy()
-    zfd_sim.loc[intervenir, "IFO_sim"] = (zfd_sim.loc[intervenir, "IFO_v2"] - reduccion_ifo).clip(lower=0)
-
-    B0, B1 = 0.9640, -1.0213
-    zfd_sim["IDH_sim"] = zfd_sim["IFO_sim"] - (B0 + B1 * zfd_sim["IDS"])
-    zfd_sim["IPSS_sim"] = zfd_sim["IDS"] * zfd_sim["IFO_sim"]
-
-    # ¿Cuántas salen de ZFD?  (IDH_sim <= 0 ya no es "encima de la recta")
-    salen = int((zfd_sim.loc[intervenir, "IDH_sim"] <= 0).sum())
-    siguen = n_zonas - salen
+    # ── Panel de contexto ────────────────────────────────────────────────────────
+    st.markdown(
+        f"**Base de simulación:** {len(zfd_a)} zonas ZFD-A · "
+        f"{int(zfd_a['n_per'].sum()):,} personas · IDH medio = +{zfd_a['IDH'].mean():.3f}".replace(",",".")
+    )
+    st.caption(
+        "⚠️ **Modelo de accesibilidad potencial, no predicción operacional.** "
+        "Cada CESFAM reduce el IFO en 0,07 puntos para las zonas de la comuna seleccionada, "
+        "asumiendo capacidad promedio de la red pública existente y sin redistribución "
+        "conductual de demanda."
+    )
 
     st.divider()
-    st.subheader("Resultado de la simulación")
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Zonas intervenidas", n_zonas)
-    r2.metric("Zonas que salen de ZFD", salen, delta=f"-{salen} zonas ZFD-A")
-    r3.metric("Reducción relativa ZFD-A", f"{salen/len(zfd_a)*100:.1f}%")
 
-    # Gráfico comparativo
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for ax, col, title in zip(axes,
-                              ["IDH", "IDH_sim"],
-                              ["IDH actual", "IDH simulado"]):
-        ax.hist(zfd_sim[col], bins=20, color="#C0392B" if "sim" not in col else "#E8A29A",
-                edgecolor="white", linewidth=0.5)
-        ax.axvline(0, color="#1F2A30", lw=1.5, ls="--")
+    # ── Parámetros ───────────────────────────────────────────────────────────────
+    comunas_zfda = sorted(zfd_a["COMUNA"].dropna().unique())
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        comuna_sel = st.selectbox("Comuna de intervención", comunas_zfda)
+        n_cesfam   = st.select_slider(
+            "Número de CESFAM nuevos",
+            options=[1, 2, 3, 4, 5],
+            value=2,
+        )
+        st.caption(
+            f"ΔIFO aplicado: {DELTA_IFO_CESFAM * n_cesfam:.2f}  "
+            f"({n_cesfam} × {DELTA_IFO_CESFAM:.2f} por CESFAM)"
+        )
+
+    # ── Simulación ───────────────────────────────────────────────────────────────
+    # Zonas intervenidas = todas las ZFD-A de la comuna seleccionada
+    mask_comuna = zfd_a["COMUNA"] == comuna_sel
+    zfd_sim     = zfd_a.copy()
+    delta       = float(n_cesfam) * DELTA_IFO_CESFAM   # negativo
+
+    zfd_sim["IFO_sim"]  = zfd_sim["IFO_v2"].copy()
+    zfd_sim.loc[mask_comuna, "IFO_sim"] = (
+        zfd_sim.loc[mask_comuna, "IFO_v2"] + delta
+    ).clip(lower=0.0)
+
+    zfd_sim["IDH_sim"]  = zfd_sim["IFO_sim"]  - (B0 + B1 * zfd_sim["IDS"])
+    zfd_sim["IPSS_sim"] = zfd_sim["IDS"] * zfd_sim["IFO_sim"]
+
+    # Zonas que salen de ZFD (IDH_sim ≤ 0) DENTRO de la comuna intervenida
+    intervenidas  = zfd_sim[mask_comuna]
+    n_intervenidas = len(intervenidas)
+    salen         = int((intervenidas["IDH_sim"] <= 0).sum())
+    pop_salen     = int(intervenidas.loc[intervenidas["IDH_sim"] <= 0, "n_per"].sum())
+    pop_interviene = int(intervenidas["n_per"].sum())
+
+    with col2:
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Zonas ZFD-A en la comuna", n_intervenidas)
+        r2.metric("Zonas que salen de ZFD", salen,
+                  delta=f"−{salen} zonas" if salen > 0 else "ninguna")
+        r3.metric("Personas rescatadas", f"{pop_salen:,}".replace(",","."),
+                  delta=f"{pop_salen/pop_interviene*100:.0f}% de la comuna intervenida" if pop_interviene > 0 else "—")
+
+        if salen == 0 and n_intervenidas > 0:
+            idh_min = float(intervenidas["IDH"].min())
+            cesfam_necesarios = int(np.ceil(-idh_min / DELTA_IFO_CESFAM))
+            st.info(
+                f"Con {n_cesfam} CESFAM el IDH no alcanza a cruzar cero en ninguna zona. "
+                f"La zona más marginal tiene IDH = +{idh_min:.3f}; "
+                f"necesitaría al menos **{cesfam_necesarios} CESFAM** para salir de ZFD."
+            )
+        elif salen == n_intervenidas:
+            st.success(
+                f"✅ Todas las zonas ZFD-A de {comuna_sel} salen de la falla doble "
+                f"con {n_cesfam} CESFAM. Esto equivale a {pop_salen:,} personas rescatadas.".replace(",",".")
+            )
+        else:
+            st.warning(
+                f"{salen} de {n_intervenidas} zonas salen de ZFD. "
+                f"Las {n_intervenidas - salen} restantes tienen IDH demasiado alto "
+                "para ser rescatadas con esta intervención."
+            )
+
+    # ── Gráfico IDH actual vs simulado ───────────────────────────────────────────
+    st.divider()
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+    RED, REDP, INK = "#C0392B", "#E8A29A", "#1F2A30"
+
+    for ax, col_idh, title, color in [
+        (axes[0], "IDH",     "IDH actual",   RED),
+        (axes[1], "IDH_sim", "IDH simulado", REDP),
+    ]:
+        datos_all    = zfd_sim[col_idh]
+        datos_comun  = intervenidas[col_idh] if col_idh == "IDH_sim" else intervenidas["IDH"]
+        ax.hist(datos_all, bins=20, color="#D9D9D9", edgecolor="white", lw=0.5, label="Otras comunas")
+        ax.hist(datos_comun, bins=10, color=color, edgecolor="white", lw=0.5, alpha=0.9, label=comuna_sel)
+        ax.axvline(0, color=INK, lw=1.5, ls="--", alpha=0.7)
         ax.set_title(title, fontsize=11)
         ax.set_xlabel("IDH (desajuste homeostático)")
+        ax.legend(fontsize=8)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
     plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
 
-    st.subheader(f"Top zonas intervenidas (ordenadas por {col_ord})")
-    cols_show = ["COMUNA", "IDS", "IFO_v2", "IFO_sim", "IDH", "IDH_sim", "IPSS_v2", "IPSS_sim"]
-    st.dataframe(
-        zfd_sim.loc[intervenir, cols_show]
-               .sort_values(col_ord, ascending=False)
-               .style.format("{:.3f}", subset=["IDS","IFO_v2","IFO_sim","IDH","IDH_sim","IPSS_v2","IPSS_sim"])
-               .background_gradient(subset=["IDH_sim"], cmap="RdYlGn_r")
-    )
+    # ── Tabla de zonas intervenidas ──────────────────────────────────────────────
+    with st.expander(f"Detalle zonas ZFD-A de {comuna_sel} ({n_intervenidas} zonas)"):
+        tabla = intervenidas[["ID_ZONA","IDS","IFO_v2","IFO_sim","IDH","IDH_sim","n_per"]].copy()
+        tabla["sale_ZFD"] = tabla["IDH_sim"] <= 0
+        st.dataframe(
+            tabla.sort_values("IDH").set_index("ID_ZONA")
+                .style.format({"IDS":"{:.3f}","IFO_v2":"{:.3f}","IFO_sim":"{:.3f}",
+                               "IDH":"{:+.3f}","IDH_sim":"{:+.3f}","n_per":"{:.0f}"})
+                .background_gradient(subset=["IDH_sim"], cmap="RdYlGn_r")
+        )
+
+    # ── Nota metodológica expandible ─────────────────────────────────────────────
+    with st.expander("Nota metodológica"):
+        st.markdown(f"""
+**Calibración ΔIFO = −0,07 por CESFAM**
+
+Estimada como 1/5 de la brecha entre el IFO medio de las zonas ZFD-A (0,670) y el
+IFO medio de las zonas LL (0,343) del Gran Santiago. Asume que 5 CESFAM de capacidad
+promedio (≈ 15.000 inscritos c/u) serían suficientes para cerrar el déficit de
+accesibilidad potencial de una zona típica ZFD-A.
+
+**Supuestos y limitaciones**
+- La demanda no se redistribuye (la población no cambia de CESFAM al agregar uno nuevo).
+- El nuevo establecimiento opera con la capacidad promedio de la red pública existente.
+- El efecto se aplica a todas las zonas de la comuna; en la realidad depende del radio
+  2SFCA (1.500 m) del establecimiento.
+- Los coeficientes OLS están congelados: β₀ = {B0}, β₁ = {B1}.
+- IFO v2 captura **accesibilidad potencial**, no utilización real ni calidad de atención.
+
+**Para citar:** IPSS v2 = IDS × IFO v2 · ZFD = LISA HH AND IDH > 0 · Moran's I = 0,3776 (p = 0,001)
+""")
 
 except FileNotFoundError:
-    st.warning("Archivos de datos no encontrados en `data/`.")
-    st.code("data/ifo_v2_zonal.parquet\ndata/lisa_zonal.parquet")
+    st.error("Archivo `data/zonas.parquet` no encontrado.")
+    st.code("Ejecuta preparar_datos_simulador.py para generar el archivo.")

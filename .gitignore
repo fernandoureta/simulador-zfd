@@ -1,4 +1,5 @@
-data/*.parquet
+# datos sensibles originales — NO commitear
+# zonas.parquet SI va al repo (datos públicos INE/DEIS, precalculados)
 data/*.csv
 __pycache__/
 *.pyc
