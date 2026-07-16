@@ -82,7 +82,7 @@ try:
     # ── Simulación: distance-decay sobre TODAS las zonas ────────────────────────
     sim = df.copy()
     d   = dist_m(new_lat, new_lon, sim["lat"].values, sim["lon"].values)
-    decay = (1 - d / radio).clip(lower=0)   # factor lineal en [0,1]
+    decay = np.clip(1 - d / radio, 0, None)  # numpy: a_min=0, no lower=
 
     sim["IFO_sim"]  = (sim["IFO_v2"] - red_max * decay).clip(lower=0)
     sim["IDH_sim"]  = sim["IFO_sim"] - (B0 + B1 * sim["IDS"])
