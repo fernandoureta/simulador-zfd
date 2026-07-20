@@ -17,7 +17,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="centered",
+                   initial_sidebar_state="collapsed")
 st.title("⚙️ Simulador de intervención territorial")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -59,10 +60,11 @@ try:
 
     # ── Parámetros ───────────────────────────────────────────────────────────────
     comunas_zfda = sorted(zfd_a["COMUNA"].dropna().unique())
+    default_idx  = list(comunas_zfda).index("Maipú") if "Maipú" in comunas_zfda else 0
     col1, col2   = st.columns([1, 2])
 
     with col1:
-        comuna_sel = st.selectbox("Comuna de intervención", comunas_zfda)
+        comuna_sel = st.selectbox("Comuna de intervención", comunas_zfda, index=default_idx)
         tipo_sel   = st.selectbox("Tipo de establecimiento", list(TIPOS.keys()))
         cfg        = TIPOS[tipo_sel]
         radio      = cfg["radio"]

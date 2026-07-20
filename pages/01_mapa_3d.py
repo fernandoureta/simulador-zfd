@@ -5,7 +5,8 @@ import geopandas as gpd
 import pydeck as pdk
 import os
 
-st.set_page_config(page_title="Mapa 3D ZFD", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="Mapa 3D ZFD", page_icon="🗺️", layout="wide",
+                   initial_sidebar_state="collapsed")
 st.title("🗺️ Mapa 3D — Intensidad IPSS por zona censal")
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zonas.parquet")
@@ -27,6 +28,7 @@ try:
     df = df.copy()
     df["color"] = df["tipo"].map(COLOR_MAP)
 
+    st.caption("☝️ Un dedo: mover · Dos dedos: rotar y zoom")
     variable = st.selectbox("Variable de altura", ["IPSS_v2","IDS","IFO_v2","IDH"])
     escala   = st.slider("Escala de altura", 500, 8000, 2500, step=250)
     df["elevation"] = df[variable].clip(lower=0) * escala
