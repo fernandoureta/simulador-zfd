@@ -17,8 +17,6 @@ import numpy as np
 import folium
 import os
 
-st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="centered",
-                   initial_sidebar_state="collapsed")
 st.title("⚙️ Simulador de intervención territorial")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")

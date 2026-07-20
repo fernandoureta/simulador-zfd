@@ -6,8 +6,6 @@ import pandas as pd
 import numpy as np
 import os
 
-st.set_page_config(page_title="Detalle por zona", page_icon="🔍", layout="centered",
-                   initial_sidebar_state="collapsed")
 st.title("🔍 Ficha de zona censal")
 
 DATA_DIR  = os.path.join(os.path.dirname(__file__), "..", "data")
