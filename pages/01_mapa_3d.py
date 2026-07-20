@@ -1,104 +1,76 @@
 # -*- coding: utf-8 -*-
-"""Capa 1 — Mapa coroplético de exclusión en salud (Folium + polígonos reales)."""
+"""Capa 1 — Mapa 3D IPSS por zona censal (pydeck ColumnLayer)."""
 import streamlit as st
 import geopandas as gpd
-import folium
+import pydeck as pdk
 import os
 
-st.set_page_config(page_title="Mapa ZFD", page_icon="🗺️", layout="centered",
+st.set_page_config(page_title="Mapa 3D ZFD", page_icon="🗺️", layout="wide",
                    initial_sidebar_state="collapsed")
-st.title("🗺️ Zonas de Falla Doble · Gran Santiago")
+st.title("🗺️ Mapa 3D — Intensidad IPSS por zona censal")
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zonas.parquet")
 
 @st.cache_data
 def cargar():
     gdf = gpd.read_parquet(DATA_PATH)
-    cols = ["ID_ZONA", "COMUNA", "tipo", "IPSS_v2", "IDS", "IFO_v2", "IDH", "n_per", "geometry"]
-    return gdf[cols]
-
-COLORES = {
-    "ZFD-A": "#C0392B",
-    "ZFD-B": "#E8A29A",
-    "LL":    "#2C7FB8",
-    "Resto": "#666666",
-}
-
-OPACIDAD = {
-    "ZFD-A": 0.88,
-    "ZFD-B": 0.78,
-    "LL":    0.55,
-    "Resto": 0.10,
-}
-
-def estilo(feature):
-    tipo = feature["properties"].get("tipo", "Resto")
-    return {
-        "fillColor":   COLORES.get(tipo, "#666"),
-        "fillOpacity": OPACIDAD.get(tipo, 0.1),
-        "color":       "transparent",
-        "weight":      0,
-    }
+    return gdf[["ID_ZONA","COMUNA","tipo","IPSS_v2","IDS","IFO_v2","IDH","n_per","lon","lat"]].dropna(subset=["lon","lat"])
 
 try:
-    gdf = cargar()
+    df = cargar()
 
-    m = folium.Map(
-        location=[-33.46, -70.65],
-        zoom_start=11,
-        tiles="CartoDB DarkMatter",
-        scrollWheelZoom=False,
-        attributionControl=False,
+    COLOR_MAP = {
+        "ZFD-A": [192,  57,  43, 210],
+        "ZFD-B": [232, 162, 154, 200],
+        "LL":    [ 44, 127, 184, 170],
+        "Resto": [170, 170, 170,  90],
+    }
+    df = df.copy()
+    df["color"] = df["tipo"].map(COLOR_MAP)
+
+    variable = st.selectbox("Variable de altura", ["IPSS_v2","IDS","IFO_v2","IDH"])
+    escala   = st.slider("Escala de altura", 500, 8000, 2500, step=250)
+    df["elevation"] = df[variable].clip(lower=0) * escala
+
+    st.caption("☝️ Un dedo: mover · Dos dedos: rotar y zoom")
+
+    layer = pdk.Layer(
+        "ColumnLayer",
+        data=df,
+        get_position=["lon","lat"],
+        get_elevation="elevation",
+        radius=150,
+        get_fill_color="color",
+        pickable=True,
+        auto_highlight=True,
+        elevation_scale=1,
     )
+    view = pdk.ViewState(longitude=-70.65, latitude=-33.46, zoom=10, pitch=48, bearing=0)
 
-    # Orden de renderizado: Resto → LL → ZFD-B → ZFD-A (ZFD-A queda encima)
-    for tipo in ["Resto", "LL", "ZFD-B", "ZFD-A"]:
-        sub = gdf[gdf["tipo"] == tipo].copy()
-        if len(sub) == 0:
-            continue
-
-        tooltip = None
-        if tipo in ("ZFD-A", "ZFD-B"):
-            tooltip = folium.GeoJsonTooltip(
-                fields=["COMUNA", "tipo", "IPSS_v2", "n_per"],
-                aliases=["Comuna", "Tipo", "IPSS", "Hab."],
-                localize=True,
-                sticky=False,
-            )
-        elif tipo == "LL":
-            tooltip = folium.GeoJsonTooltip(
-                fields=["COMUNA", "IPSS_v2"],
-                aliases=["Comuna", "IPSS"],
-                localize=True,
-                sticky=False,
-            )
-
-        folium.GeoJson(
-            sub[["geometry", "tipo", "COMUNA", "IPSS_v2", "n_per"]],
-            style_function=estilo,
-            tooltip=tooltip,
-            name=tipo,
-        ).add_to(m)
-
-    st.components.v1.html(m._repr_html_(), height=520)
+    st.pydeck_chart(pdk.Deck(
+        layers=[layer],
+        initial_view_state=view,
+        map_style="mapbox://styles/mapbox/dark-v10",
+        tooltip={"text": "{COMUNA}\nTipo: {tipo}\nIPSS: {IPSS_v2}\nIDS: {IDS}\nIFO: {IFO_v2}\nIDH: {IDH}"},
+    ))
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Zonas ZFD-A", int((gdf["tipo"] == "ZFD-A").sum()), "exclusión periférica")
-    col2.metric("Zonas ZFD-B", int((gdf["tipo"] == "ZFD-B").sum()), "sustitución privada")
-    col3.metric("Zonas LL",    int((gdf["tipo"] == "LL").sum()),    "acceso adecuado")
-    col4.metric("Total zonas", len(gdf))
+    col1.metric("Zonas ZFD-A", int((df["tipo"]=="ZFD-A").sum()), "crecimiento no compensado")
+    col2.metric("Zonas ZFD-B", int((df["tipo"]=="ZFD-B").sum()), "sustitución privada")
+    col3.metric("Zonas LL",    int((df["tipo"]=="LL").sum()),    "acceso concentrado")
+    col4.metric("Total zonas", len(df))
 
     with st.expander("ℹ️ Sobre el mapa"):
         st.markdown("""
-**ZFD-A** (rojo): alta vulnerabilidad social Y acceso deficiente a red pública,
+**ZFD-A** (rojo): zonas con alta vulnerabilidad social (IDS↑) Y acceso deficiente a la red pública (IFO↑),
 fuera de las 6 comunas con cobertura ISAPRE dominante.
 
-**ZFD-B** (rosa): mismo patrón en Las Condes, Vitacura, Providencia, Ñuñoa,
-Lo Barnechea y La Reina — red pública ausente por sustitución privada.
+**ZFD-B** (rosa): mismo patrón en Las Condes, Vitacura, Providencia, Ñuñoa, Lo Barnechea, La Reina —
+red pública ausente por sustitución privada.
 
-**LL** (azul): clústers de bajo-bajo — la red de salud compensa la vulnerabilidad.
+**LL** (azul): clústers de bajo-bajo (baja vulnerabilidad O buena accesibilidad) — la red compensa.
 
-Toca una zona para ver sus indicadores.
+La altura representa la intensidad de la variable seleccionada.
 """)
 
 except FileNotFoundError:
