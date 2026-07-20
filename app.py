@@ -153,12 +153,10 @@ st.divider()
 # ── NAVIGATION ────────────────────────────────────────────────────────────────
 st.markdown('<div class="nav-label">Explorar</div>', unsafe_allow_html=True)
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 with col1:
-    st.page_link("pages/01_mapa_3d.py",       label="🗺️ Mapa 3D",    use_container_width=True)
-with col2:
     st.page_link("pages/02_detalle_zona.py",   label="🔍 Por zona",   use_container_width=True)
-with col3:
+with col2:
     st.page_link("pages/03_simulador.py",      label="⚙️ Simular",    use_container_width=True)
 
 st.divider()

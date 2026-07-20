@@ -14,7 +14,7 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import folium
 import os
 
 st.set_page_config(page_title="Simulador ZFD", page_icon="⚙️", layout="centered",
@@ -131,32 +131,70 @@ try:
                 .replace(",",".")
             )
 
-    # ── Mapa de efecto ───────────────────────────────────────────────────────────
+    # ── Mapa de efecto (Folium) ──────────────────────────────────────────────────
     st.subheader("Efecto espacial del establecimiento")
-    c_map1, c_map2 = st.columns(2)
 
-    for col_grafico, col_idh, titulo in [
-        (c_map1, "IDH",     "IDH actual"),
-        (c_map2, "IDH_sim", "IDH simulado"),
-    ]:
-        fig, ax = plt.subplots(figsize=(4.5, 4))
-        RED, BLUE, GREY = "#C0392B", "#2C7FB8", "#D9D9D9"
-        colors = sim["tipo"].map({"ZFD-A":RED,"ZFD-B":"#E8A29A","LL":BLUE,"Resto":GREY})
-        ax.scatter(sim["lon"], sim["lat"], c=colors, s=2, alpha=0.6, lw=0)
-        # Nuevo establecimiento
-        ax.scatter(new_lon, new_lat, marker="*", s=180, c="#27AE60", zorder=5, label="Nuevo estab.")
-        # Radio
-        theta = np.linspace(0, 2*np.pi, 120)
-        r_deg_lat = radio / 111_320
-        r_deg_lon = radio / (111_320 * 0.832)
-        ax.plot(new_lon + r_deg_lon * np.cos(theta), new_lat + r_deg_lat * np.sin(theta),
-                "g--", lw=1, alpha=0.6)
-        ax.set_title(titulo, fontsize=10)
-        ax.axis("off")
-        ax.legend(fontsize=7, loc="lower left")
-        fig.tight_layout(pad=0.2)
-        col_grafico.pyplot(fig)
-        plt.close(fig)
+    COLORES_TIPO = {"ZFD-A": "#C0392B", "ZFD-B": "#E8A29A", "LL": "#2C7FB8", "Resto": "#334155"}
+    OPACIDAD_TIPO = {"ZFD-A": 0.85, "ZFD-B": 0.75, "LL": 0.55, "Resto": 0.08}
+    VERDE = "#27AE60"
+
+    sim["rescued"] = (dentro_radio & (sim["tipo"] == "ZFD-A") & (sim["IDH_sim"] <= 0)).astype(bool)
+
+    def hacer_mapa(mostrar_rescate):
+        m = folium.Map(
+            location=[new_lat, new_lon],
+            zoom_start=12,
+            tiles="CartoDB DarkMatter",
+            attributionControl=False,
+            scrollWheelZoom=False,
+        )
+
+        def estilo(feat):
+            tipo = feat["properties"]["tipo"]
+            rescued = feat["properties"].get("rescued", False)
+            if mostrar_rescate and rescued:
+                return {"fillColor": VERDE, "fillOpacity": 0.90,
+                        "color": "#ffffff", "weight": 0.8}
+            return {
+                "fillColor": COLORES_TIPO.get(tipo, "#334155"),
+                "fillOpacity": OPACIDAD_TIPO.get(tipo, 0.08),
+                "color": "transparent", "weight": 0,
+            }
+
+        cols_geo = ["geometry", "tipo", "COMUNA", "IPSS_v2", "n_per", "rescued"]
+        for tipo in ["Resto", "LL", "ZFD-B", "ZFD-A"]:
+            sub = sim[sim["tipo"] == tipo][cols_geo]
+            tooltip = None
+            if tipo in ("ZFD-A", "ZFD-B"):
+                tooltip = folium.GeoJsonTooltip(
+                    fields=["COMUNA", "tipo", "IPSS_v2", "n_per"],
+                    aliases=["Comuna", "Tipo", "IPSS", "Hab."],
+                    localize=True, sticky=False,
+                )
+            folium.GeoJson(sub, style_function=estilo, tooltip=tooltip).add_to(m)
+
+        folium.Circle(
+            location=[new_lat, new_lon], radius=radio,
+            color=VERDE, weight=2,
+            fill=True, fill_color=VERDE, fill_opacity=0.08,
+        ).add_to(m)
+
+        folium.Marker(
+            location=[new_lat, new_lon],
+            popup=folium.Popup(
+                f"<b>Nuevo {cfg['grupo']}</b><br>{comuna_sel}<br>"
+                f"Radio: {radio/1000:.1f} km", max_width=180
+            ),
+            icon=folium.Icon(color="green", icon="plus-sign"),
+        ).add_to(m)
+
+        return m
+
+    tab1, tab2 = st.tabs(["📍 Situación actual", "✅ Con intervención"])
+    with tab1:
+        st.components.v1.html(hacer_mapa(False)._repr_html_(), height=460)
+    with tab2:
+        st.components.v1.html(hacer_mapa(True)._repr_html_(), height=460)
 
     # ── Tabla de zonas en el radio ────────────────────────────────────────────────
     with st.expander(f"Zonas ZFD-A dentro del radio ({n_en_radio} zonas)"):
