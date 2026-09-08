@@ -142,7 +142,8 @@ try:
         m = folium.Map(
             location=[new_lat, new_lon],
             zoom_start=12,
-            tiles="CartoDB DarkMatter",
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, HERE, Garmin, &copy; OpenStreetMap contributors",
             attributionControl=False,
             scrollWheelZoom=False,
         )
