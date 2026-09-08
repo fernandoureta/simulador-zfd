@@ -2,9 +2,9 @@
 """
 Capa 1 — Mapa interactivo del Gran Santiago.
 
-Muestra las 1.636 zonas censales coloreadas por su clasificación ZFD, los 26
-hospitales públicos, y una capa de comunas que despliega indicadores agregados
-al pasar el cursor por encima.
+Muestra las 1.636 zonas censales coloreadas por su clasificación ZFD, la red
+pública (hospitales y CESFAM) y una capa de comunas que despliega indicadores
+agregados al pasar el cursor por encima.
 """
 import os
 
@@ -16,15 +16,63 @@ import streamlit as st
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 COLORES = {
-    "ZFD-A": "#C0392B",
-    "ZFD-B": "#E8A29A",
-    "LL":    "#2C7FB8",
-    "Resto": "#334155",
+    "ZFD-A": "#E2434A",
+    "ZFD-B": "#F27186",
+    "LL":    "#2F6FA8",
+    "Resto": "#1E293B",
 }
-OPACIDAD = {"ZFD-A": 0.88, "ZFD-B": 0.80, "LL": 0.55, "Resto": 0.12}
+OPACIDAD = {"ZFD-A": 0.90, "ZFD-B": 0.84, "LL": 0.50, "Resto": 0.30}
+
+COLOR_HOSPITAL = "#FFC24B"
+COLOR_CESFAM   = "#3FD07E"
 
 TILES_URL  = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
 TILES_ATTR = "Esri, HERE, Garmin, &copy; OpenStreetMap contributors"
+
+# CSS inyectado dentro del mapa Folium: oscurece el basemap para que las zonas
+# resalten, y define el latido de los CESFAM (sin GIF, escala sin perder nitidez).
+CSS_MAPA = f"""
+<style>
+.leaflet-tile-pane {{ filter: brightness(.55) saturate(.55) contrast(1.08); }}
+.leaflet-container {{ background: #080B14; }}
+
+.cesfam-dot {{
+    width: 6px; height: 6px; border-radius: 50%;
+    background: {COLOR_CESFAM}; opacity: .9;
+    box-shadow: 0 0 0 .5px rgba(8,11,20,.85);
+    animation: latido 2.8s ease-out infinite;
+}}
+@keyframes latido {{
+    0%   {{ box-shadow: 0 0 0 .5px rgba(8,11,20,.85), 0 0 0 0 rgba(63,208,126,.45); }}
+    70%  {{ box-shadow: 0 0 0 .5px rgba(8,11,20,.85), 0 0 0 8px rgba(63,208,126,0); }}
+    100% {{ box-shadow: 0 0 0 .5px rgba(8,11,20,.85), 0 0 0 0 rgba(63,208,126,0); }}
+}}
+
+.hosp-dot {{
+    width: 13px; height: 13px; border-radius: 3px;
+    background: {COLOR_HOSPITAL};
+    border: 1.5px solid #080B14;
+    box-shadow: 0 0 10px rgba(255,194,75,.45);
+    position: relative;
+}}
+.hosp-dot::before, .hosp-dot::after {{
+    content: ''; position: absolute; background: #080B14;
+}}
+.hosp-dot::before {{ left: 4.4px; top: 1.8px; width: 1.8px; height: 6.4px; }}
+.hosp-dot::after  {{ top: 4.4px; left: 1.8px; height: 1.8px; width: 6.4px; }}
+
+.leyenda-mapa {{
+    position: absolute; left: 14px; top: 14px; z-index: 900;
+    background: rgba(8,11,20,.82); backdrop-filter: blur(8px);
+    border: 1px solid rgba(148,163,184,.18); border-radius: 12px;
+    padding: 12px 14px; font-family: Inter, sans-serif; font-size: 11.5px;
+    color: #CBD5E1; line-height: 1.9; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+}}
+.leyenda-mapa .fila {{ display: flex; align-items: center; gap: 8px; }}
+.leyenda-mapa .caja {{ width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }}
+.leyenda-mapa .sep  {{ height: 1px; background: rgba(148,163,184,.16); margin: 7px 0; }}
+</style>
+"""
 
 
 def miles(x) -> str:
@@ -45,7 +93,7 @@ def cargar():
 
 
 @st.cache_data
-def preparar_comunas(_zonas: gpd.GeoDataFrame, hosp_por_comuna: dict) -> gpd.GeoDataFrame:
+def preparar_comunas(_zonas: gpd.GeoDataFrame, hosp_por_comuna: dict, cesfam_por_comuna: dict) -> gpd.GeoDataFrame:
     """Disuelve las zonas censales en comunas y agrega sus indicadores."""
     geo = _zonas.dissolve(by="COMUNA")[["geometry"]].reset_index()
 
@@ -70,13 +118,14 @@ def preparar_comunas(_zonas: gpd.GeoDataFrame, hosp_por_comuna: dict) -> gpd.Geo
     )
 
     com = geo.merge(ind, on="COMUNA")
-    com["pct_zfd"] = com["pob_zfd"] / com["poblacion"].replace(0, 1) * 100
-    com["n_hosp"]  = com["COMUNA"].map(hosp_por_comuna).fillna(0).astype(int)
+    com["pct_zfd"]  = com["pob_zfd"] / com["poblacion"].replace(0, 1) * 100
+    com["n_hosp"]   = com["COMUNA"].map(hosp_por_comuna).fillna(0).astype(int)
+    com["n_cesfam"] = com["COMUNA"].map(cesfam_por_comuna).fillna(0).astype(int)
 
     # Campos ya formateados para el tooltip
     com["t_comuna"] = com["COMUNA"]
     com["t_pob"]    = com["poblacion"].apply(lambda v: f"{miles(v)} habitantes")
-    com["t_zonas"]  = com.apply(lambda r: f"{int(r['n_zonas'])} zonas censales", axis=1)
+    com["t_zonas"]  = com["n_zonas"].apply(lambda v: f"{int(v)} zonas censales")
     com["t_zfd"]    = com.apply(
         lambda r: f"{int(r['n_zfd'])} zonas · {miles(r['pob_zfd'])} personas ({dec(r['pct_zfd'], 1)}%)",
         axis=1,
@@ -85,44 +134,65 @@ def preparar_comunas(_zonas: gpd.GeoDataFrame, hosp_por_comuna: dict) -> gpd.Geo
     com["t_ifo"]  = com["IFO"].apply(dec)
     com["t_ipss"] = com["IPSS"].apply(dec)
     com["t_idh"]  = com["IDH"].apply(lambda v: ("+" if v > 0 else "") + dec(v))
-    com["t_hosp"] = com["n_hosp"].apply(
-        lambda v: "sin hospital público" if v == 0 else (f"{v} hospital" if v == 1 else f"{v} hospitales")
+    com["t_red"]  = com.apply(
+        lambda r: (
+            ("sin hospital" if r["n_hosp"] == 0 else f"{int(r['n_hosp'])} hospital"
+             + ("es" if r["n_hosp"] > 1 else ""))
+            + " · "
+            + (f"{int(r['n_cesfam'])} CESFAM" if r["n_cesfam"] else "sin CESFAM")
+        ),
+        axis=1,
     )
     return com
 
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+# ── CSS de la página ──────────────────────────────────────────────────────────
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
 .stApp { font-family: 'Inter', sans-serif; }
+.block-container { max-width: 1300px; padding-top: 3.4rem; padding-bottom: 2rem; }
 
-/* Layout ancho para el mapa, pero acotado para que no se estire de borde a borde */
-.block-container { max-width: 1280px; padding-top: 2rem; }
-
-.zfd-head { text-align:center; padding:.5rem 0 1rem; }
+.zfd-head { text-align:center; padding:0 0 1rem; }
 .zfd-kicker {
-    font-family:'JetBrains Mono',monospace; font-size:11px; text-transform:uppercase;
-    letter-spacing:.12em; color:#475569; margin-bottom:.5rem;
+    font-family:'JetBrains Mono',monospace; font-size:10.5px; font-weight:500;
+    text-transform:uppercase; letter-spacing:.22em; color:#8090A8; margin-bottom:.75rem;
 }
-.zfd-title { font-size:clamp(22px,4vw,32px); font-weight:800; color:#F8FAFC; letter-spacing:-.5px; margin:0; }
-.zfd-sub   { font-size:14px; color:#94A3B8; margin:.5rem 0 0; }
-.zfd-sub b { color:#E8A29A; font-weight:600; }
+.zfd-title {
+    font-size:clamp(26px,3.6vw,40px); font-weight:800; color:#F1F5F9;
+    letter-spacing:-1px; line-height:1.1; margin:0;
+}
+.zfd-sub { font-size:14.5px; color:#8FA0B8; margin:.8rem auto 0; max-width:640px; line-height:1.6; }
+.zfd-sub b { color:#F27186; font-weight:700; }
 
-.stat-row { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:0 0 1rem; }
-.stat-box { background:#0E1223; border:1px solid #1E2D42; border-radius:14px; padding:14px 8px; text-align:center; }
-.stat-v   { font-family:'JetBrains Mono',monospace; font-size:clamp(17px,2.4vw,24px); font-weight:700; color:#F8FAFC; line-height:1; }
-.stat-l   { font-size:10px; color:#475569; margin-top:6px; text-transform:uppercase; letter-spacing:.05em; line-height:1.3; }
+.stat-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:0 0 1.1rem; }
+.stat-box {
+    background:linear-gradient(160deg,#101728 0%,#0B101C 100%);
+    border:1px solid #1B2740; border-radius:16px; padding:14px 10px; text-align:center;
+}
+.stat-v {
+    font-family:'JetBrains Mono',monospace; font-size:clamp(20px,2.6vw,28px);
+    font-weight:700; color:#F1F5F9; line-height:1; letter-spacing:-.5px;
+}
+.stat-v.acento { color:#F27186; }
+.stat-l {
+    font-size:9.5px; color:#54627A; margin-top:8px; text-transform:uppercase;
+    letter-spacing:.13em; line-height:1.4; font-weight:500;
+}
 
-.legend-row  { display:flex; gap:16px; justify-content:center; flex-wrap:wrap; margin:.75rem 0; }
-.legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:#94A3B8; }
-.ldot  { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
-.lhosp { width:11px; height:11px; border-radius:3px; background:#F5B942; border:1.5px solid #0b0f1a; flex-shrink:0; }
-
-.hint { text-align:center; font-size:12px; color:#64748B; margin:.25rem 0 .75rem; }
-.nav-label { text-align:center; font-size:11px; font-weight:600; color:#334155;
-             text-transform:uppercase; letter-spacing:.1em; margin:1.25rem 0 .6rem; }
+.hint {
+    text-align:center; font-size:11.5px; color:#54627A; margin:0 0 .7rem;
+    letter-spacing:.03em;
+}
+.mapa-wrap {
+    border:1px solid #1B2740; border-radius:18px; overflow:hidden;
+    box-shadow:0 16px 50px rgba(0,0,0,.5);
+}
+.nav-label {
+    text-align:center; font-size:10px; font-weight:600; color:#334155;
+    text-transform:uppercase; letter-spacing:.16em; margin:1.4rem 0 .7rem;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -145,23 +215,33 @@ st.markdown(
 
 try:
     zonas, estab = cargar()
+
     hospitales = estab[estab["tipo_grupo"] == "hospital"].copy()
-    hosp_por_comuna = hospitales["ComunaGlosa"].value_counts().to_dict()
-    comunas = preparar_comunas(zonas, hosp_por_comuna)
+    cesfam     = estab[estab["tipo_grupo"] == "primaria"].copy()
+    comunas    = preparar_comunas(
+        zonas,
+        hospitales["ComunaGlosa"].value_counts().to_dict(),
+        cesfam["ComunaGlosa"].value_counts().to_dict(),
+    )
 
     # ── INDICADORES ───────────────────────────────────────────────────────────
-    n_zfd  = int(zonas["tipo"].isin(["ZFD-A", "ZFD-B"]).sum())
-    pob_gs = zonas["n_per"].sum()
+    n_zfd = int(zonas["tipo"].isin(["ZFD-A", "ZFD-B"]).sum())
     st.markdown(
         f"""
 <div class="stat-row">
-  <div class="stat-box"><div class="stat-v">{len(zonas)}</div><div class="stat-l">Zonas<br>censales</div></div>
-  <div class="stat-box"><div class="stat-v">{n_zfd}</div><div class="stat-l">Zonas de<br>falla doble</div></div>
-  <div class="stat-box"><div class="stat-v">19,2%</div><div class="stat-l">Del Gran<br>Santiago</div></div>
-  <div class="stat-box"><div class="stat-v">{len(hospitales)}</div><div class="stat-l">Hospitales<br>públicos</div></div>
+  <div class="stat-box"><div class="stat-v">{miles(len(zonas))}</div><div class="stat-l">Zonas censales</div></div>
+  <div class="stat-box"><div class="stat-v acento">{n_zfd}</div><div class="stat-l">Zonas de falla doble</div></div>
+  <div class="stat-box"><div class="stat-v acento">19,2%</div><div class="stat-l">Del Gran Santiago</div></div>
+  <div class="stat-box"><div class="stat-v">{len(hospitales)} · {len(cesfam)}</div><div class="stat-l">Hospitales · CESFAM</div></div>
 </div>
 """,
         unsafe_allow_html=True,
+    )
+
+    ver_cesfam = st.toggle(
+        "Mostrar los 236 CESFAM",
+        value=False,
+        help="Centros de atención primaria de la red pública",
     )
 
     # ── MAPA ──────────────────────────────────────────────────────────────────
@@ -171,15 +251,15 @@ try:
         tiles=TILES_URL,
         attr=TILES_ATTR,
         attributionControl=False,
+        zoom_control=False,
     )
-    # Encuadra el Gran Santiago para que no sobre mapa vacío alrededor
     minx, miny, maxx, maxy = zonas.total_bounds
     m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(8, 8))
+    m.get_root().header.add_child(folium.Element(CSS_MAPA))
 
     # Zonas censales, de fondo hacia adelante
-    cols_zona = ["geometry", "tipo", "COMUNA", "IPSS_v2", "n_per"]
     for tipo in ["Resto", "LL", "ZFD-B", "ZFD-A"]:
-        sub = zonas[zonas["tipo"] == tipo][cols_zona]
+        sub = zonas[zonas["tipo"] == tipo][["geometry", "tipo"]]
         if sub.empty:
             continue
         folium.GeoJson(
@@ -193,24 +273,25 @@ try:
             },
         ).add_to(m)
 
-    # Capa de comunas: invisible pero sensible al cursor, va encima de todo
+    # Capa de comunas: sin relleno visible. Al pasar el cursor solo se dibuja
+    # el contorno, para no tapar las zonas que están debajo.
     folium.GeoJson(
         comunas,
         name="Comunas",
         style_function=lambda _f: {
             "fillColor": "#ffffff",
             "fillOpacity": 0.01,
-            "color": "#64748B",
-            "weight": 0.8,
+            "color": "#3E4C63",
+            "weight": 0.7,
         },
         highlight_function=lambda _f: {
-            "fillColor": "#F8FAFC",
-            "fillOpacity": 0.18,
-            "color": "#F8FAFC",
-            "weight": 2.5,
+            "fillColor": "#ffffff",
+            "fillOpacity": 0.01,
+            "color": "#FFFFFF",
+            "weight": 3,
         },
         tooltip=folium.GeoJsonTooltip(
-            fields=["t_comuna", "t_pob", "t_zonas", "t_zfd", "t_ids", "t_ifo", "t_ipss", "t_idh", "t_hosp"],
+            fields=["t_comuna", "t_pob", "t_zonas", "t_zfd", "t_ids", "t_ifo", "t_ipss", "t_idh", "t_red"],
             aliases=[
                 "Comuna",
                 "Población",
@@ -220,60 +301,77 @@ try:
                 "IFO · fricción de oferta",
                 "IPSS · presión sistema",
                 "IDH · desacoplamiento",
-                "Red hospitalaria",
+                "Red pública",
             ],
             localize=False,
             sticky=True,
             labels=True,
             style=(
-                "background-color:#0E1223; color:#E2E8F0; border:1px solid #1E2D42;"
-                "border-radius:10px; padding:10px 12px; font-family:Inter,sans-serif;"
-                "font-size:12px; box-shadow:0 8px 28px rgba(0,0,0,.55);"
+                "background:rgba(8,11,20,.94); color:#E2E8F0;"
+                "border:1px solid rgba(148,163,184,.22); border-radius:12px;"
+                "padding:12px 14px; font-family:Inter,sans-serif; font-size:12px;"
+                "box-shadow:0 10px 34px rgba(0,0,0,.6);"
             ),
         ),
     ).add_to(m)
 
-    # Hospitales públicos
+    # CESFAM — puntos que laten, con desfase para que no pulsen todos a la vez
+    if ver_cesfam:
+        for i, (_, c) in enumerate(cesfam.iterrows()):
+            if pd.isna(c["Latitud"]) or pd.isna(c["Longitud"]):
+                continue
+            folium.Marker(
+                location=[c["Latitud"], c["Longitud"]],
+                icon=folium.DivIcon(
+                    html=f'<div class="cesfam-dot" style="animation-delay:{(i % 9) * 0.27:.2f}s"></div>',
+                    icon_size=(6, 6),
+                    icon_anchor=(3, 3),
+                ),
+                tooltip=folium.Tooltip(
+                    f"<b>{c['EstablecimientoGlosa']}</b><br>CESFAM · {c['ComunaGlosa']}",
+                    style="font-family:Inter,sans-serif;font-size:12px;",
+                ),
+            ).add_to(m)
+
+    # Hospitales — marca fija con cruz, por encima de los CESFAM
     for _, h in hospitales.iterrows():
         if pd.isna(h["Latitud"]) or pd.isna(h["Longitud"]):
             continue
-        folium.CircleMarker(
+        folium.Marker(
             location=[h["Latitud"], h["Longitud"]],
-            radius=5.5,
-            color="#0b0f1a",
-            weight=1.5,
-            fill=True,
-            fill_color="#F5B942",
-            fill_opacity=1,
+            icon=folium.DivIcon(html='<div class="hosp-dot"></div>', icon_size=(13, 13), icon_anchor=(6, 6)),
             tooltip=folium.Tooltip(
-                f"<b>{h['EstablecimientoGlosa']}</b><br>{h['ComunaGlosa']}",
-                style="font-family:Inter,sans-serif; font-size:12px;",
+                f"<b>{h['EstablecimientoGlosa']}</b><br>Hospital · {h['ComunaGlosa']}",
+                style="font-family:Inter,sans-serif;font-size:12px;",
             ),
         ).add_to(m)
+
+    # Leyenda flotante dentro del mapa
+    m.get_root().html.add_child(
+        folium.Element(
+            f"""
+<div class="leyenda-mapa">
+  <div class="fila"><span class="caja" style="background:{COLORES['ZFD-A']}"></span>ZFD-A · exclusión periférica</div>
+  <div class="fila"><span class="caja" style="background:{COLORES['ZFD-B']}"></span>ZFD-B · sustitución privada</div>
+  <div class="fila"><span class="caja" style="background:{COLORES['LL']}"></span>Acceso adecuado</div>
+  <div class="sep"></div>
+  <div class="fila"><span class="hosp-dot"></span>Hospital público</div>
+  <div class="fila"><span class="cesfam-dot"></span>CESFAM</div>
+</div>
+"""
+        )
+    )
 
     st.markdown(
         '<div class="hint">Pasa el cursor sobre una comuna para ver sus indicadores</div>',
         unsafe_allow_html=True,
     )
-    st.components.v1.html(m._repr_html_(), height=680)
-
-    # ── LEYENDA ───────────────────────────────────────────────────────────────
-    st.markdown(
-        """
-<div class="legend-row">
-  <span class="legend-item"><span class="ldot" style="background:#C0392B"></span>ZFD-A · exclusión periférica</span>
-  <span class="legend-item"><span class="ldot" style="background:#E8A29A"></span>ZFD-B · sustitución privada</span>
-  <span class="legend-item"><span class="ldot" style="background:#2C7FB8"></span>LL · acceso adecuado</span>
-  <span class="legend-item"><span class="lhosp"></span>Hospital público</span>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="mapa-wrap">', unsafe_allow_html=True)
+    st.components.v1.html(m._repr_html_(), height=560)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 except FileNotFoundError:
     st.error("No se encontraron los datos en `data/`. Verifica zonas.parquet y establecimientos.parquet.")
-
-st.divider()
 
 # ── NAVEGACIÓN ────────────────────────────────────────────────────────────────
 st.markdown('<div class="nav-label">Explorar</div>', unsafe_allow_html=True)
